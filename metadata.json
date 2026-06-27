@@ -1,0 +1,8 @@
+{
+  "name": "LinhHoat AI - Dịch Trung-Việt",
+  "description": "Ứng dụng dịch thuật thông minh từ tiếng Trung sang tiếng Việt, hỗ trợ dịch văn bản và tệp phụ đề hàng loạt không giới hạn.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
