@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "cache_dir": "model_cache",
+  "ffmpeg": {
+    "zip_url": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+    "required_files": ["ffmpeg.exe", "ffprobe.exe"]
+  },
+  "python": {
+    "venv_python": "local_vieneu/venv/Scripts/python.exe",
+    "requirements": ["tools/portable_requirements.txt"]
+  },
+  "huggingface_models": [
+    {
+      "name": "faster-whisper-large-v3-turbo",
+      "repo_id": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+      "local_dir": "model_cache/huggingface/mobiuslabsgmbh/faster-whisper-large-v3-turbo"
+    },
+    {
+      "name": "faster-whisper-small",
+      "repo_id": "Systran/faster-whisper-small",
+      "local_dir": "model_cache/huggingface/Systran/faster-whisper-small"
+    }
+  ],
+  "funasr_models": [
+    {
+      "name": "SenseVoiceSmall",
+      "model_id": "iic/SenseVoiceSmall",
+      "local_dir": "models/SenseVoiceSmall_hf"
+    }
+  ],
+  "paddleocr": {
+    "enabled": true,
+    "lang": "ch"
+  }
+}

@@ -1,36 +1,44 @@
 {
-  "name": "react-example",
-  "private": true,
-  "version": "0.0.0",
-  "type": "module",
+  "name": "vnsnap-studio",
+  "version": "1.2.0",
+  "description": "VnSnap Studio portable voice, subtitle, video automation tool",
+  "main": "main.js",
   "scripts": {
-    "dev": "tsx server.ts",
-    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
-    "start": "node dist/server.cjs",
-    "preview": "vite preview",
-    "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "test": "jest",
+    "start": "electron .",
+    "build": "electron-packager . VnSnapStudio --platform=win32 --arch=x64 --out=Release_App --overwrite"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DoXmee/Vnsnap.git"
+  },
+  "keywords": [
+    "vnsnap",
+    "video editor",
+    "auto edit",
+    "subtitle translation",
+    "srt",
+    "gemini",
+    "capcut",
+    "douyin",
+    "bilibili",
+    "tts",
+    "portable"
+  ],
+  "author": "DoXmee",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/DoXmee/Vnsnap/issues"
+  },
+  "homepage": "https://github.com/DoXmee/Vnsnap#readme",
   "dependencies": {
-    "@google/genai": "^1.29.0",
-    "@tailwindcss/vite": "^4.1.14",
-    "@vitejs/plugin-react": "^5.0.4",
-    "dotenv": "^17.2.3",
-    "express": "^4.21.2",
-    "lucide-react": "^0.546.0",
-    "motion": "^12.23.24",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "vite": "^6.2.0"
+    "axios": "^1.3.4",
+    "p-limit": "^2.3.0",
+    "srt-parser-2": "^1.2.3"
   },
   "devDependencies": {
-    "@types/express": "^4.17.21",
-    "@types/node": "^22.14.0",
-    "autoprefixer": "^10.4.21",
-    "esbuild": "^0.28.1",
-    "tailwindcss": "^4.1.14",
-    "tsx": "^4.21.0",
-    "typescript": "~5.8.2",
-    "vite": "^6.2.0"
+    "electron": "^41.1.1",
+    "electron-packager": "^17.1.2",
+    "jest": "^29.5.0"
   }
 }
