@@ -1,14 +1,15 @@
 $ErrorActionPreference = "Continue"
-Set-Location "D:\tiktok-tts-main\tiktok-tts-main"
+$repoRoot = $PSScriptRoot
+Set-Location $repoRoot
 $env:PYTHONIOENCODING = "utf-8"
 $env:PYTHONUNBUFFERED = "1"
 
-$python = "D:\tiktok-tts-main\tiktok-tts-main\local_vieneu\venv\Scripts\python.exe"
-$train = "D:\tiktok-tts-main\tiktok-tts-main\tools\train_vieneu_lora.py"
-$dataset = "D:\tiktok-tts-main\tiktok-tts-main\vieneu_work\finetune_dataset\thanh_thao_vieneu_v4_combined_v2_hanhan"
-$out = "D:\tiktok-tts-main\tiktok-tts-main\vieneu_work\lora\thanh_thao_vieneu_lora_v4_full"
-$resume = "D:\tiktok-tts-main\tiktok-tts-main\vieneu_work\lora\thanh_thao_vieneu_lora_v4_full\checkpoint-5000"
-$log = "D:\tiktok-tts-main\tiktok-tts-main\vieneu_work\logs\thanh_thao_v4_continue_5000_10000.log"
+$python = Join-Path $repoRoot "local_vieneu\venv\Scripts\python.exe"
+$train = Join-Path $repoRoot "tools\train_vieneu_lora.py"
+$dataset = Join-Path $repoRoot "vieneu_work\finetune_dataset\thanh_thao_vieneu_v4_combined_v2_hanhan"
+$out = Join-Path $repoRoot "vieneu_work\lora\thanh_thao_vieneu_lora_v4_full"
+$resume = Join-Path $out "checkpoint-5000"
+$log = Join-Path $repoRoot "vieneu_work\logs\thanh_thao_v4_continue_5000_10000.log"
 
 "[$(Get-Date -Format o)] START train continue from checkpoint-5000 to max_steps=10000" | Tee-Object -FilePath $log -Append
 & $python $train `

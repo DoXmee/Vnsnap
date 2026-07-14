@@ -49,7 +49,6 @@ def default_session_dir() -> str:
         env_dir,
         os.path.join(APP_DIR, "douyin_session"),
         os.path.join(os.path.dirname(APP_DIR), "douyin_session"),
-        r"D:\tool dow video\douyin_session",
     ]
     for candidate in candidates:
         if candidate and os.path.exists(candidate):

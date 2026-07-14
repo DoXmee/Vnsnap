@@ -121,7 +121,11 @@ def main() -> int:
 
     subtitles = extract_subtitles(json_path, use_translation=args.language == "vi")
     if not subtitles:
-        raise SystemExit("Khong tim thay phu de. File co the khong chua text track cho ngon ngu nay.")
+        raise SystemExit(
+            "Khong tim thay phu de trong project CapCut. "
+            "Che do doc project chi hoat dong khi project da co caption/text track san. "
+            "Neu muon CapCut tu nhan dien tu video, hay chon 'Lay SRT tu dong tu video'."
+        )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as f:

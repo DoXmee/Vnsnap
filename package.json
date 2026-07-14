@@ -1,12 +1,13 @@
 {
   "name": "vnsnap-studio",
+  "productName": "VnSnap Studio",
   "version": "1.2.0",
   "description": "VnSnap Studio portable voice, subtitle, video automation tool",
   "main": "main.js",
   "scripts": {
     "test": "jest",
     "start": "electron .",
-    "build": "electron-packager . VnSnapStudio --platform=win32 --arch=x64 --out=Release_App --overwrite"
+    "build": "electron-packager . VnSnapStudio --platform=win32 --arch=x64 --out=Release_App --overwrite --icon=assets/vnsnap-icon.ico"
   },
   "repository": {
     "type": "git",

@@ -1,6 +1,8 @@
 # Portable Build Guide
 
-This guide describes the clean portable packaging flow for VnSnap Studio.
+This guide describes the portable packaging boundary for VnSnap Studio.
+
+Tài liệu này mô tả ranh giới đóng gói portable của VnSnap Studio.
 
 ## 1. Build Electron App
 
@@ -45,6 +47,18 @@ Private builds can include:
 
 These builds are for your own machines only.
 
+Place persistent data beside the executable under:
+
+```text
+portable.marker
+portable_data/electron_profile/
+portable_data/gemini_web_worker/
+portable_data/douyin_session/
+portable_data/playwright-browsers/
+```
+
+Never publish this variant because it may contain credentials and browser cookies.
+
 ## 4. Public GitHub Releases
 
 Public GitHub releases must be source-clean:
@@ -59,5 +73,4 @@ Public GitHub releases must be source-clean:
 - no Python runtime
 - no FFmpeg binaries
 
-Use the source-clean zip for GitHub uploads.
-
+Use Git source or a separately prepared source-clean archive for public uploads. Never derive a public release by deleting a few files from a private portable archive; rebuild from a source whitelist instead.

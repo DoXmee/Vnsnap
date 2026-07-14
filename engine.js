@@ -66,9 +66,17 @@ let currentSessionIndex = 0;
 let _sessionRotating = false; // Mutex chống race condition
 
 let TEMP_DIR = "";
-// TikTok: dynamic concurrency bắt đầu từ 1, max 2. Provider khác giữ nguyên 8.
-const TIKTOK_SESSION_COUNT = Math.max(1, SESSION_INPUTS.length);
-let tikTokConcurrency = Math.max(1, Math.min(parseInt(process.env.VF_CONCURRENCY || "1"), TIKTOK_SESSION_COUNT, 2));
+// TikTok concurrency is selected by the Voice UI (default 10, maximum 15).
+const requestedTikTokMode = String(process.env.VF_TIKTOK_MODE || "").trim().toLowerCase();
+const TIKTOK_MODE = ["cookie", "with_cookie"].includes(requestedTikTokMode)
+    ? "cookie"
+    : ["no_cookie", "no-cookie", "nocookie"].includes(requestedTikTokMode)
+        ? "no_cookie"
+        : (SESSION_INPUTS.length ? "cookie" : "no_cookie");
+const TIKTOK_TEXT_MAX = 2000;
+const TIKTOK_CHUNK_MAX = 220;
+const TIKTOK_MAX_CONCURRENCY = 15;
+let tikTokConcurrency = Math.max(1, Math.min(parseInt(process.env.VF_CONCURRENCY || "10") || 10, TIKTOK_MAX_CONCURRENCY));
 const CONCURRENCY_DOWNLOAD = Math.max(1, parseInt(process.env.VF_CONCURRENCY || "50"));
 const SUB_BATCH            = Math.max(20, parseInt(process.env.VF_SUB_BATCH || "200"));
 const MAX_PARALLEL_FFMPEG  = parseInt(process.env.VF_FFMPEG_PAR   || "12");
@@ -89,20 +97,32 @@ const TTS_PITCH = Math.max(0.7, Math.min(1.6, parseFloat(process.env.VF_TTS_PITC
 
 const parser = new SRTParser();
 const agent  = new https.Agent({ keepAlive: true, maxSockets: 25 });
-const TIKTOK_STABLE_HOSTS = [
+const TIKTOK_COOKIE_HOSTS = [
     "api16-normal-c-useast1a.tiktokv.com",
     "api19-normal-c-useast1a.tiktokv.com",
     "api22-normal-c-useast1a.tiktokv.com",
-];
-const TIKTOK_EXTENDED_HOSTS = [
     "api22-normal-useast5.tiktokv.com",
     "api16-normal-useast5.tiktokv.com",
     "api.tiktokv.com",
 ];
-const TIKTOK_HOSTS = (process.env.VF_TIKTOK_EXTENDED_HOSTS === "1")
-    ? [...TIKTOK_STABLE_HOSTS, ...TIKTOK_EXTENDED_HOSTS]
-    : TIKTOK_STABLE_HOSTS;
-const TIKTOK_AIDS = [1233, 1234, 1180, 1988];
+const TIKTOK_NO_COOKIE_HOSTS = [
+    "api22-normal-useast5.tiktokv.com",
+    "api16-normal-useast5.tiktokv.com",
+    "api.tiktokv.com",
+];
+const TIKTOK_NO_COOKIE_WORKER = "https://tiktok-tts.weilnet.workers.dev/api/generation";
+const TIKTOK_DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+const TIKTOK_ANDROID_UA = "com.zhiliaoapp.musically/2022409010 (Linux; U; Android 7.1.2; en_US; SM-G965N; Build/QP1A.190711.020; Cronet/TTNetVersion:ee6b8f1c 2021-12-02 QuicVersion:47946d2a 2021-11-17)";
+const VI_TTS_VOICE_ALIASES = {
+    vi_female_huong: 'BV074_streaming',
+    BV074_streaming_dsp: 'BV074_streaming',
+};
+const VI_TTS_VOICE_META = [
+    { id: 'BV074_streaming', label: 'Co Gai Hoat Ngon', gender: 'female' },
+    { id: 'BV421_vivn_streaming', label: 'Nho Ngot Ngao', gender: 'female' },
+    { id: 'BV560_streaming', label: 'Anh Dung', gender: 'male' },
+    { id: 'BV075_streaming', label: 'Thanh Nien Tu Tin', gender: 'male' },
+];
 const IP_REFRESH_SCRIPT = process.env.VF_IP_REFRESH_SCRIPT || path.join(APP_DIR, "ip_refresh.ps1");
 const IP_REFRESH_CMD = process.env.VF_IP_REFRESH_CMD || "";
 const IP_REFRESH_MIN_GAP_MS = Math.max(60000, parseInt(process.env.VF_IP_REFRESH_MIN_GAP_MS || "300000"));
@@ -176,7 +196,19 @@ function shuffledList(items) {
 }
 
 function pickTikTokAid() {
-    return TIKTOK_AIDS[Math.floor(Math.random() * TIKTOK_AIDS.length)];
+    return 1180;
+}
+
+function normalizeVoiceCode(voice) {
+    const raw = String(voice || '').trim();
+    return VI_TTS_VOICE_ALIASES[raw] || raw || 'BV074_streaming';
+}
+
+function voiceGender(voice) {
+    const normalized = normalizeVoiceCode(voice);
+    const meta = VI_TTS_VOICE_META.find(item => item.id.toLowerCase() === normalized.toLowerCase());
+    if (meta) return meta.gender;
+    return /(?:male|nam|BV560|BV075)/i.test(normalized) ? 'male' : 'female';
 }
 
 async function runCommandHidden(cmd, timeoutMs = 120000) {
@@ -333,6 +365,10 @@ function pLimit(concurrency) {
         queue.push({ fn, resolve, reject }); next();
     });
 }
+
+// One shared request pool keeps the selected TikTok limit across both SRT cues
+// and chunks of a long cue. Promise.all below still preserves chunk order.
+const tikTokRequestLimit = pLimit(tikTokConcurrency);
 
 function atempoChain(value) {
     let v = Math.max(0.25, Math.min(4, parseFloat(value) || 1));
@@ -517,12 +553,13 @@ async function fakeBrowse(sessionIdx) {
 // ─────────────────────────────────────────────
 async function probeSession(sessionId, voice, sessionIdx) {
     const fp = getFingerprintForSession(sessionIdx);
+    const tiktokVoice = normalizeVoiceCode(voice);
     const encodedText = encodeURIComponent('test');
     const aid = pickTikTokAid();
-    const hostname = shuffledList(TIKTOK_HOSTS)[0];
+    const hostname = TIKTOK_COOKIE_HOSTS[0];
     const options = {
         hostname,
-        path: `/media/api/text/speech/invoke/?text_speaker=${voice}&req_text=${encodedText}&speaker_map_type=0&aid=${aid}`,
+        path: `/media/api/text/speech/invoke/?text_speaker=${tiktokVoice}&req_text=${encodedText}&speaker_map_type=0&aid=${aid}`,
         method: 'POST',
         agent,
         headers: {
@@ -589,67 +626,181 @@ async function findAliveSession(voice) {
 // ─────────────────────────────────────────────
 // TTS PROVIDERS
 // ─────────────────────────────────────────────
-async function tts_tiktok(text, outFile, voice) {
-    const safeText = cleanForTikTokTts(text).slice(0, 220);
-    const encodedText = encodeURIComponent(safeText);
-    let lastErr = '';
-    let lastErrObj = null;
-    for (const hostname of shuffledList(TIKTOK_HOSTS)) {
-        const fp = getFingerprintForSession(currentSessionIndex);
-        const aid = pickTikTokAid();
-        const cookie = buildCookieHeader(currentSessionIndex);
-        const headers = {
-            'User-Agent': fp.userAgent,
-            'Accept-Language': fp.acceptLang,
-            'Content-Type': 'application/x-www-form-urlencoded',
-        };
-        if (cookie) headers.Cookie = cookie;
-        const options = {
-            hostname,
-            path: `/media/api/text/speech/invoke/?text_speaker=${voice}&req_text=${encodedText}&speaker_map_type=0&aid=${aid}`,
-            method: 'POST', agent,
-            headers
-        };
+function splitTikTokText(text) {
+    const safeText = cleanForTikTokTts(text);
+    if (!safeText) return [];
+    if (safeText.length > TIKTOK_TEXT_MAX) {
+        throw new TikTokTtsError('text_too_long', `TikTok TTS chi nhan toi da ${TIKTOK_TEXT_MAX} ky tu moi muc (nhan ${safeText.length}).`);
+    }
+    if (safeText.length <= TIKTOK_CHUNK_MAX) return [safeText];
+
+    const chunks = [];
+    let remaining = safeText;
+    while (remaining.length > TIKTOK_CHUNK_MAX) {
+        const minBoundary = Math.floor(TIKTOK_CHUNK_MAX * 0.55);
+        let boundary = -1;
+        for (let i = TIKTOK_CHUNK_MAX; i >= minBoundary; i--) {
+            if (/[.!?;,:\s]/.test(remaining[i - 1])) {
+                boundary = i;
+                break;
+            }
+        }
+        if (boundary < 1) boundary = TIKTOK_CHUNK_MAX;
+        const chunk = remaining.slice(0, boundary).trim();
+        if (chunk) chunks.push(chunk);
+        remaining = remaining.slice(boundary).trim();
+    }
+    if (remaining) chunks.push(remaining);
+    return chunks;
+}
+
+function validTikTokAudio(value) {
+    if (typeof value !== 'string' || value.length < 500) return false;
+    try { return Buffer.from(value, 'base64').length > 300; } catch (_) { return false; }
+}
+
+async function fetchTikTokJson(url, options = {}, timeoutMs = 15000) {
+    const response = await fetch(url, {
+        ...options,
+        signal: AbortSignal.timeout(timeoutMs),
+    });
+    const body = await response.text();
+    let json = null;
+    try { json = JSON.parse(body); } catch (_) {}
+    return { response, body, json };
+}
+
+async function requestTikTokNoCookie(text, voice) {
+    const routeErrors = [];
+    try {
+        const { response, body, json } = await fetchTikTokJson(TIKTOK_NO_COOKIE_WORKER, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'User-Agent': TIKTOK_DESKTOP_UA,
+            },
+            body: JSON.stringify({ text, voice }),
+        });
+        if (response.ok && json?.success && validTikTokAudio(json.data)) {
+            return { buffer: Buffer.from(json.data, 'base64'), source: 'weilnet' };
+        }
+        const classified = classifyTikTokFailure({ httpStatus: response.status, body, json });
+        routeErrors.push(`weilnet:${classified.type}:${classified.message}`);
+    } catch (error) {
+        const classified = classifyTikTokFailure({ cause: error });
+        routeErrors.push(`weilnet:${classified.type}:${classified.message}`);
+    }
+
+    const encodedText = encodeURIComponent(text).replace(/%20/g, '+');
+    for (const hostname of TIKTOK_NO_COOKIE_HOSTS) {
         try {
-            await new Promise((resolve, reject) => {
-                const req = https.request(options, res => {
-                    let data = '';
-                    res.on('data', c => data += c);
-                    res.on('end', () => {
-                        try {
-                            if (!data || !data.trim().startsWith('{')) {
-                                return reject(makeTikTokError({ httpStatus: res.statusCode, body: data }));
-                            }
-                            const json = JSON.parse(data);
-                            if (json.status_code === 0 && json.data?.v_str) {
-                                fs.writeFileSync(outFile, Buffer.from(json.data.v_str, 'base64'));
-                                resolve();
-                            } else {
-                                reject(makeTikTokError({ httpStatus: res.statusCode, body: data, json }));
-                            }
-                        } catch(e) {
-                            if (e instanceof TikTokTtsError) reject(e);
-                            else reject(makeTikTokError({ httpStatus: res.statusCode, body: data, cause: e }));
-                        }
-                    });
-                });
-                req.on('error', e => reject(makeTikTokError({ cause: e })));
-                req.setTimeout(15000, () => {
-                    req.destroy();
-                    reject(new TikTokTtsError('network', 'request timeout'));
-                });
-                req.end();
+            const url = `https://${hostname}/media/api/text/speech/invoke/?text_speaker=${encodeURIComponent(voice)}&req_text=${encodedText}&speaker_map_type=0&aid=1180`;
+            const { response, body, json } = await fetchTikTokJson(url, {
+                method: 'POST',
+                headers: { 'User-Agent': TIKTOK_ANDROID_UA },
             });
-            return; // thành công
-        } catch(e) {
-            lastErr = e.message;
-            lastErrObj = e;
-            const retryable = ['network', 'server', 'bad_response'].includes(e.type);
-            if (!retryable) break;
+            const audio = json?.data?.v_content || json?.data?.v_str;
+            if (response.ok && json?.status_code === 0 && validTikTokAudio(audio)) {
+                return { buffer: Buffer.from(audio, 'base64'), source: `direct:${hostname}` };
+            }
+            const classified = classifyTikTokFailure({ httpStatus: response.status, body, json });
+            routeErrors.push(`${hostname}:${classified.type}:${classified.message}`);
+        } catch (error) {
+            const classified = classifyTikTokFailure({ cause: error });
+            routeErrors.push(`${hostname}:${classified.type}:${classified.message}`);
         }
     }
-    if (lastErrObj instanceof TikTokTtsError) throw lastErrObj;
-    throw new TikTokTtsError('bad_response', `TikTok: ${lastErr}`);
+    throw new TikTokTtsError('provider_unavailable', `TIKTOK_NO_COOKIE_FAILED: ${routeErrors.join(' | ')}`);
+}
+
+async function requestTikTokCookie(text, voice) {
+    const cookie = buildCookieHeader(currentSessionIndex);
+    if (!cookie) throw new TikTokTtsError('auth_dead', 'TIKTOK_COOKIE_REQUIRED: Chua co TikTok session cookie.');
+    const routeErrors = [];
+    const encodedText = encodeURIComponent(text);
+    for (const hostname of TIKTOK_COOKIE_HOSTS) {
+        try {
+            const url = `https://${hostname}/media/api/text/speech/invoke/?text_speaker=${encodeURIComponent(voice)}&req_text=${encodedText}&speaker_map_type=0&aid=1180`;
+            const { response, body, json } = await fetchTikTokJson(url, {
+                method: 'POST',
+                headers: {
+                    Cookie: cookie,
+                    'User-Agent': TIKTOK_ANDROID_UA,
+                    'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+            });
+            const audio = json?.data?.v_content || json?.data?.v_str;
+            if (response.ok && json?.status_code === 0 && validTikTokAudio(audio)) {
+                return { buffer: Buffer.from(audio, 'base64'), source: `cookie:${hostname}` };
+            }
+            const classified = classifyTikTokFailure({ httpStatus: response.status, body, json });
+            routeErrors.push(`${hostname}:${classified.type}:${classified.message}`);
+            if (classified.type === 'auth_dead') break;
+        } catch (error) {
+            const classified = classifyTikTokFailure({ cause: error });
+            routeErrors.push(`${hostname}:${classified.type}:${classified.message}`);
+        }
+    }
+    const details = routeErrors.join(' | ');
+    const type = /auth_dead/.test(details) ? 'auth_dead' : /rate_limit/.test(details) ? 'rate_limit' : 'provider_unavailable';
+    throw new TikTokTtsError(type, `TIKTOK_COOKIE_FAILED: ${details}`);
+}
+
+async function requestTikTokChunk(text, voice) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            return TIKTOK_MODE === 'cookie'
+                ? await requestTikTokCookie(text, voice)
+                : await requestTikTokNoCookie(text, voice);
+        } catch (error) {
+            lastError = error;
+            if (error?.type === 'auth_dead' || error?.type === 'text_too_long' || attempt === 3) break;
+            process.stdout.write(`TikTok ${TIKTOK_MODE} retry ${attempt}/2: ${String(error.message || error).slice(0, 260)}\n`);
+            await new Promise(resolve => setTimeout(resolve, 700 * attempt));
+        }
+    }
+    throw lastError || new TikTokTtsError('provider_unavailable', `TikTok ${TIKTOK_MODE} khong tao duoc voice.`);
+}
+
+async function tts_tiktok(text, outFile, voice) {
+    const chunks = splitTikTokText(text);
+    if (!chunks.length) throw new TikTokTtsError('empty_text', 'TikTok TTS: noi dung rong sau khi lam sach.');
+    const tiktokVoice = normalizeVoiceCode(voice);
+    const chunkResults = await Promise.all(chunks.map(chunk =>
+        tikTokRequestLimit(() => requestTikTokChunk(chunk, tiktokVoice))
+    ));
+    const audioParts = chunkResults.map(result => result.buffer);
+
+    fs.mkdirSync(path.dirname(outFile), { recursive: true });
+    if (audioParts.length === 1) {
+        fs.writeFileSync(outFile, audioParts[0]);
+        return;
+    }
+
+    const token = `${process.pid}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const partFiles = audioParts.map((buffer, index) => {
+        const file = path.join(path.dirname(outFile), `.tts_${token}_${index}.mp3`);
+        fs.writeFileSync(file, buffer);
+        return file;
+    });
+    const listFile = path.join(path.dirname(outFile), `.tts_${token}.txt`);
+    const listContent = partFiles
+        .map(file => `file '${path.resolve(file).replace(/\\/g, '/').replace(/'/g, "'\\''")}'`)
+        .join('\n');
+    fs.writeFileSync(listFile, listContent, 'utf8');
+    try {
+        const cmd = `${ffmpegExe} -y -hide_banner -f concat -safe 0 -i "${listFile}" -c:a libmp3lame -b:a 128k "${outFile}"`;
+        await runFFmpegWithRetry(cmd, 2);
+        if (!fs.existsSync(outFile) || fs.statSync(outFile).size < 500) {
+            throw new Error('TikTok TTS concat output khong hop le.');
+        }
+    } finally {
+        for (const file of [...partFiles, listFile]) {
+            try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch (_) {}
+        }
+    }
 }
 
 async function tts_fptai(text, outFile, voice) {
@@ -871,6 +1022,7 @@ async function render_local_vieneu_text(text, outputPath, voice) {
 
 async function requestTTS(text, outFile, voice) {
     switch (PROVIDER) {
+        case 'capcut_app': return tts_capcut_app(text, outFile, voice);
         case 'capcut': return tts_capcut(text, outFile, voice);
         case 'capcut_anon': return tts_tiktok(text, outFile, voice);
         case 'fptai':  return tts_fptai(text, outFile, voice);
@@ -881,22 +1033,65 @@ async function requestTTS(text, outFile, voice) {
     }
 }
 
+async function tts_capcut_app(text, outFile, voice) {
+    if (!CAPCUT_TTS_URL) throw new Error("CAPCUT_APP_URL_MISSING");
+    const url = new URL('/v1/synthesize', CAPCUT_TTS_URL.replace(/\/+$/, ""));
+    url.searchParams.set('text', cleanForTikTokTts(text));
+    url.searchParams.set('type', normalizeVoiceCode(voice));
+    url.searchParams.set('pitch', String(Math.max(1, Math.round(TTS_PITCH * 10))));
+    url.searchParams.set('speed', String(Math.max(1, Math.round(TTS_SPEED * 10))));
+    url.searchParams.set('volume', '10');
+    url.searchParams.set('method', 'buffer');
+    const response = await fetch(url, {
+        signal: AbortSignal.timeout(Math.max(10000, Number(process.env.VF_CAPCUT_APP_REQUEST_TIMEOUT_MS) || 30000))
+    });
+    if (!response.ok) {
+        const detail = (await response.text()).slice(0, 800);
+        if (response.status === 503 || /LEGACY_DEVICE_TIME|LEGACY_SIGN|not configured/i.test(detail)) {
+            throw new Error(`CAPCUT_APP_NOT_CONFIGURED: ${detail}`);
+        }
+        throw new Error(`CAPCUT_APP_TTS_HTTP_${response.status}: ${detail}`);
+    }
+    const audio = Buffer.from(await response.arrayBuffer());
+    if (audio.length < 1000) throw new Error(`CAPCUT_APP_EMPTY_AUDIO:${audio.length}`);
+    fs.writeFileSync(outFile, audio);
+}
+
+function capCutWebError(status, detail) {
+    const text = String(detail || '').slice(0, 800);
+    if (status === 429 || /SmartToolRateLimit|rate.?limit|too many|quota/i.test(text)) {
+        return new Error(`CAPCUT_WEB_RATE_LIMIT: CapCut Web da cham gioi han SmartToolRateLimit. ${text}`);
+    }
+    if (status === 401 || status === 403 || /session|login|unauthor|forbidden|auth/i.test(text)) {
+        return new Error(`CAPCUT_WEB_SESSION_EXPIRED: Session CapCut Web khong con hop le. ${text}`);
+    }
+    if (/speaker|voice|model/i.test(text)) {
+        return new Error(`CAPCUT_WEB_VOICE_UNAVAILABLE: CapCut Web khong map duoc voice. ${text}`);
+    }
+    return new Error(`CAPCUT_WEB_HTTP_${status}: ${text}`);
+}
+
 async function tts_capcut(text, outFile, voice) {
     if (!CAPCUT_TTS_URL) throw new Error("CAPCUT_TTS_URL_MISSING");
-    let capcutSpeaker = String(voice || "");
-    if (!/^ICL_/i.test(capcutSpeaker)) {
-        if (!capcutSpeakerPromise) {
+    let capcutSpeaker = normalizeVoiceCode(voice);
+    if (!capcutSpeakerPromise) {
             capcutSpeakerPromise = fetch(`${CAPCUT_TTS_URL.replace(/\/+$/, "")}/v2/speakers`, {
                 signal: AbortSignal.timeout(120000)
             }).then(async response => {
-                if (!response.ok) throw new Error(`CAPCUT_SPEAKERS_HTTP_${response.status}`);
+                if (!response.ok) {
+                    const detail = await response.text();
+                    throw capCutWebError(response.status, detail);
+                }
                 const speakers = await response.json();
                 if (!Array.isArray(speakers)) throw new Error("CAPCUT_SPEAKERS_INVALID");
                 return speakers;
+            }).catch(error => {
+                capcutSpeakerPromise = null;
+                throw error;
             });
-        }
+    }
         const speakers = await capcutSpeakerPromise;
-        const wantsMale = /(?:BV560|male|nam)/i.test(capcutSpeaker);
+        const wantsMale = voiceGender(capcutSpeaker) === 'male';
         const vietnamese = speakers.filter(item => {
             const haystack = `${item.id || ""} ${item.speaker || ""} ${item.language || ""} ${item.title || ""} ${item.description || ""}`;
             return /(?:^|\W)(?:vi|vi-vn|vietnam|vietnamese|tiếng việt)(?:\W|$)/i.test(haystack);
@@ -908,7 +1103,6 @@ async function tts_capcut(text, outFile, voice) {
         const selected = genderMatch || vietnamese[0];
         capcutSpeaker = selected?.id || selected?.speaker || "";
         if (!capcutSpeaker) throw new Error("CAPCUT_NO_VIETNAMESE_SPEAKER");
-    }
     const payload = {
         text: cleanForTikTokTts(text),
         pitch: Math.max(1, Math.round(TTS_PITCH * 10)),
@@ -925,7 +1119,7 @@ async function tts_capcut(text, outFile, voice) {
     });
     if (!response.ok) {
         const detail = (await response.text()).slice(0, 800);
-        throw new Error(`CAPCUT_TTS_HTTP_${response.status}: ${detail}`);
+        throw capCutWebError(response.status, detail);
     }
     const audio = Buffer.from(await response.arrayBuffer());
     if (audio.length < 1000) throw new Error(`CAPCUT_TTS_EMPTY_AUDIO:${audio.length}`);
@@ -981,7 +1175,7 @@ async function processSrt(srtFile, outputPath, voiceCode) {
     process.stdout.write(`📁 APP_DIR: ${APP_DIR}\n`);
     process.stdout.write(`📁 ffmpeg: ${path.join(APP_DIR, 'ffmpeg.exe')} | exists=${hasFfmpeg}\n`);
     process.stdout.write(`📁 outputPath: ${outputPath}\n`);
-    if (!hasFfmpeg) { process.stdout.write(`LỖI: Không tìm thấy ffmpeg.exe tại: ${APP_DIR}\n`); process.exit(1); }
+    if (!hasFfmpeg) throw new Error(`LỖI: Không tìm thấy ffmpeg.exe tại: ${APP_DIR}`);
 
     if (PROVIDER === 'local_vieneu') {
         startTime = Date.now();
@@ -997,14 +1191,14 @@ async function processSrt(srtFile, outputPath, voiceCode) {
         return;
     }
 
-    if ((PROVIDER === 'tiktok' || !PROVIDER) && !SESSION_INPUTS.length) {
-        throw new Error('TIKTOK_AUTH_REQUIRED: Chưa có cookie TikTok. Hãy đăng nhập hoặc nhập full Cookie header có sessionid.');
+    if ((PROVIDER === 'tiktok' || !PROVIDER) && TIKTOK_MODE === 'cookie' && !SESSION_INPUTS.length) {
+        throw new TikTokTtsError('auth_dead', 'TIKTOK_COOKIE_REQUIRED: Che do cookie can TikTok session cookie.');
     }
 
     startTime = Date.now();
     const gpuInfo = USE_GPU ? `GPU(${GPU_TYPE}+hwaccel)` : 'CPU(multi-thread)';
     process.stdout.write(`🚀 BẮT ĐẦU: ${path.basename(srtFile)} | ${PROVIDER} | ${voiceCode} | Render: ${gpuInfo}\n`);
-    process.stdout.write(`⚙ concurrency=${PROVIDER==='tiktok'?tikTokConcurrency:CONCURRENCY_DOWNLOAD} | batch=${SUB_BATCH} | ffmpeg_par=${MAX_PARALLEL_FFMPEG}\n`);
+    process.stdout.write(`⚙ concurrency=${PROVIDER==='tiktok'?tikTokConcurrency:CONCURRENCY_DOWNLOAD} | tiktok_mode=${PROVIDER==='tiktok'?TIKTOK_MODE:'n/a'} | batch=${SUB_BATCH} | ffmpeg_par=${MAX_PARALLEL_FFMPEG}\n`);
     process.stdout.write(`🎚 audio speed=${TTS_SPEED.toFixed(2)}x | pitch=${TTS_PITCH.toFixed(2)}x\n`);
     process.stdout.write(`📊 Sessions: ${sessionPool.filter(s=>s.id).length} có ID | fingerprints: ${FINGERPRINTS.length}\n`);
 
@@ -1025,11 +1219,8 @@ async function processSrt(srtFile, outputPath, voiceCode) {
         // Luôn scan từ index 0 — session_state.json chỉ là gợi ý, không tin tuyệt đối
         // Lý do: nếu đổi cookie mới thì index cũ vô nghĩa, phải probe lại từ đầu
         currentSessionIndex = 0;
-        const anyAlive = PROVIDER === 'tiktok' ? await findAliveSession(voiceCode) : true;
-        if (!anyAlive) {
-            process.stdout.write(`❌ DỪNG: Tất cả session đều đã chết! Hãy thay cookie mới.\n`);
-            process.exit(1);
-        }
+        // Khong probe truoc: request that se phan loai chinh xac auth/rate-limit,
+        // dong thoi khong ton them quota khi toan bo clip da co trong cache.
     }
     // --- KẾT THÚC CƠ CHẾ AUTO-RESUME ---
 
@@ -1051,9 +1242,56 @@ async function processSrt(srtFile, outputPath, voiceCode) {
     process.stdout.write(`📥 Bước 1: ${total} clip | ${downloaded} đã có | ${missingIndices.length} cần tải (concurrency=${isTikTok ? tikTokConcurrency : CONCURRENCY_DOWNLOAD})\n`);
     if (downloaded > 0) emit('📥 Tải audio', downloaded, total, '');
 
+    // TikTok fast pipeline: khong random delay, khong phase gap, khong bo qua dong.
+    // Moi cue retry cuc bo; neu van loi thi dung de Auto Edit fallback provider va giu cache.
+    let tikTokFastPipelineCompleted = false;
+    if (isTikTok) {
+        const missingSnapshot = [...missingIndices];
+        const tikTokLimit = pLimit(tikTokConcurrency);
+        const failures = [];
+        let finishedMissing = 0;
+        process.stdout.write(`TikTok ${TIKTOK_MODE}: bat dau ${missingSnapshot.length} clip, ${tikTokConcurrency} luong, toi da ${TIKTOK_CHUNK_MAX} ky tu/request.\n`);
+        await Promise.all(missingSnapshot.map(gIdx => tikTokLimit(async () => {
+            const file = path.join(TEMP_DIR, `p${gIdx}.mp3`);
+            const item = srtData[gIdx];
+            const cleanText = cleanForTikTokTts(item?.text || '');
+            try {
+                if (!cleanText) throw new TikTokTtsError('empty_text', 'Noi dung rong sau khi lam sach.');
+                await requestTTS(cleanText, file, voiceCode);
+                await bakeTtsAudioFile(file);
+                if (!fs.existsSync(file) || fs.statSync(file).size <= 500) {
+                    throw new Error('Audio output khong hop le.');
+                }
+                downloaded++;
+                if (TIKTOK_MODE === 'cookie' && sessionPool[currentSessionIndex]) {
+                    sessionPool[currentSessionIndex].requestCount++;
+                }
+            } catch (error) {
+                try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch (_) {}
+                failures.push({ index: gIdx, error });
+            } finally {
+                finishedMissing++;
+                if (finishedMissing % 10 === 0 || finishedMissing === missingSnapshot.length) {
+                    emit('📥 Tải audio', downloaded, total, failures.length ? `loi=${failures.length}` : `${TIKTOK_MODE} ${tikTokConcurrency} luong`);
+                }
+            }
+        })));
+
+        if (failures.length) {
+            const first = failures[0];
+            const category = first.error?.type || 'unknown';
+            const detail = String(first.error?.message || first.error).slice(0, 900);
+            process.stdout.write(`VOICE_PROVIDER_UNUSABLE: TikTok ${TIKTOK_MODE} that bai ${failures.length}/${missingSnapshot.length} clip. Cache ${downloaded}/${total} clip duoc giu de fallback.\n`);
+            throw new Error(`TIKTOK_${TIKTOK_MODE.toUpperCase()}_FAILED: dong ${first.index + 1} | ${category} | ${detail}`);
+        }
+        missingIndices.splice(0, missingIndices.length);
+        tikTokFastPipelineCompleted = true;
+        process.stdout.write(`TikTok ${TIKTOK_MODE}: hoan tat ${downloaded}/${total} clip, khong bo qua dong nao.\n`);
+    }
+
     // 1b. Warmup khi resume — gửi lại 20–50 clip cũ theo thứ tự ngẫu nhiên
     // Mục tiêu: traffic không bắt đầu đột ngột từ clip mới, tránh pattern detect
-    if (isTikTok && missingIndices.length < total && downloaded > 0) {
+    if (isTikTok && !tikTokFastPipelineCompleted && missingIndices.length < total && downloaded > 0) {
         const existingIndices = [];
         for (let i = 0; i < total; i++) {
             const f = path.join(TEMP_DIR, `p${i}.mp3`);
@@ -1125,8 +1363,7 @@ async function processSrt(srtFile, outputPath, voiceCode) {
                         // Tìm session tiếp theo còn sống
                         const nextSession = getActiveSession();
                         if (!nextSession) {
-                            process.stdout.write(`\n❌ DỪNG: Tất cả session đều chết hoặc đang cooldown! Hãy thay cookie mới.\n`);
-                            process.exit(1);
+                            throw new Error('TIKTOK_COOKIE_UNUSABLE: Tất cả session đều lỗi hoặc đang cooldown. Hãy thay cookie mới.');
                         }
                         currentSessionIndex = nextSession.index;
                         // Giảm concurrency khi phải rotate
@@ -1219,7 +1456,7 @@ async function processSrt(srtFile, outputPath, voiceCode) {
                 }
                 failed++;
                 downloaded++;
-                process.stdout.write(`⚠ Bỏ qua dòng ${gIdx + 1}: ${e.message}\n`);
+                process.stdout.write(`⚠ Dòng ${gIdx + 1} lỗi tại provider ${PROVIDER}; giữ cache để fallback: ${e.message}\n`);
                 if (downloaded % 10 === 0 || downloaded === total)
                     emit('📥 Tải audio', downloaded, total, `lỗi=${failed} | retry_later=${deferredRetries}`);
             }
@@ -1243,20 +1480,16 @@ async function processSrt(srtFile, outputPath, voiceCode) {
     if (failed > 0) {
         const failureRatio = total > 0 ? failed / total : 1;
         if (failureRatio > 0.20) {
-            process.stdout.write(`\nVOICE_PROVIDER_UNUSABLE: ${failed}/${total} clips failed (${Math.round(failureRatio * 100)}%). Switching provider instead of exporting silent audio.\n`);
-            process.exit(1);
+            throw new Error(`VOICE_PROVIDER_UNUSABLE: ${failed}/${total} clips failed (${Math.round(failureRatio * 100)}%). Switching provider instead of exporting silent audio.`);
         } else if (failed <= 20) {
             process.stdout.write(`\n⚠️ CẢNH BÁO: Phát hiện ${failed} câu lỗi (trong mức cho phép <= 20). Tự động chèn khoảng lặng và ép ghép MP3...\n`);
         } else {
-            process.stdout.write(`\n❌ DỪNG KHẨN CẤP: Có quá nhiều clip lỗi (${failed} > 20). Dừng lại để bảo vệ file MP3.\n`);
-            process.stdout.write(`💡 Lời khuyên: Đổi Cookie/IP và bấm Render lại để tải nốt các câu lỗi.\n`);
-            process.exit(1); 
+            throw new Error(`VOICE_PROVIDER_UNUSABLE: Có quá nhiều clip lỗi (${failed} > 20). Cache được giữ để chạy tiếp bằng provider khác.`);
         }
     }
     // --- KẾT THÚC ĐOẠN BẠN CHÈN THÊM VÀO ---
     
     // ── TẠO PLACEHOLDER cho clip lỗi (async, không block) ──
-    process.stdout.write(`🔧 Tạo placeholder cho clip bị lỗi...\n`);
     const placeholderFactories = [];
     for (let i = 0; i < total; i++) {
         const f = path.join(TEMP_DIR, `p${i}.mp3`);
@@ -1268,6 +1501,7 @@ async function processSrt(srtFile, outputPath, voiceCode) {
         }
     }
     if (placeholderFactories.length > 0) {
+        process.stdout.write(`🔧 Tạo placeholder cho ${placeholderFactories.length} clip bị lỗi...\n`);
         const phLimit = pLimit(20);
         await Promise.all(placeholderFactories.map(fn => phLimit(fn)));
         process.stdout.write(`🔧 Đã tạo ${placeholderFactories.length} placeholder\n`);
@@ -1344,8 +1578,7 @@ async function processSrt(srtFile, outputPath, voiceCode) {
     }
     const validBatches = existingBatches.filter(b => b.exists);
     if (validBatches.length === 0) {
-        process.stdout.write(`❌ Không có batch WAV nào hợp lệ — bước 2 thất bại hoàn toàn!\n`);
-        process.exit(1);
+        throw new Error('VOICE_RENDER_FAILED: Không có batch WAV nào hợp lệ ở bước dựng timeline.');
     }
 
     const finalInputs = validBatches.map(b => `-i "${b.f}"`).join(" ");
@@ -1380,8 +1613,7 @@ async function processSrt(srtFile, outputPath, voiceCode) {
 
     // Kiểm tra file output thực sự tồn tại và có dung lượng
     if (!encodeOk || !fs.existsSync(outputPath) || fs.statSync(outputPath).size < 1000) {
-        process.stdout.write(`❌ THẤT BẠI: File output không hợp lệ hoặc không tồn tại!\n`);
-        process.exit(1);
+        throw new Error('VOICE_OUTPUT_INVALID: File output không hợp lệ hoặc không tồn tại.');
     }
 
     // Log session lifespan metrics
@@ -1401,8 +1633,9 @@ async function main() {
     try {
         await processSrt(inputSrt, outputMp3, voiceCode);
     } catch(e) {
-        process.stdout.write(`❌ CRASH processSrt: ${e.message}\n${e.stack||''}\n`);
-        process.exit(1);
+        process.stdout.write(`VOICE_ERROR: ${e.message}\n${e.stack||''}\n`);
+        try { agent.destroy(); } catch (_) {}
+        process.exitCode = 1;
     }
 }
 main();

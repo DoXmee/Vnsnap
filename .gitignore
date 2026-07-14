@@ -8,11 +8,23 @@ portable_data/
 **/*token*
 **/*api_keys*
 **/*.env
+**/*.env.*
+!**/*.env.example
 capcut_sslkeys.log
+**/*.har
+**/Cookies
+**/Cookies-journal
+**/Login Data
+**/Login Data-journal
+**/Local State
+**/*.pem
+**/*.p12
+**/*.pfx
 
 # Portable/runtime/build artifacts
 Release_App/
 Portable_Build/
+portable.marker
 local_vieneu/
 python_runtime/
 node_modules/
@@ -52,6 +64,8 @@ auto_*_validation/
 merge_speed_pipeline_test/
 srt_no_json_test/
 settings_ui_validation_profile/
+audit_validation/
+resource_deep_audit_profile/
 vieneu_work/
 voice_profiles/
 voice_packs/
@@ -66,3 +80,6 @@ ffprobe.exe
 portable_setup_report.json
 system_profile.json
 settings_ui_validation_report.json
+resource_deep_audit.json
+*_audit_report.json
+*_turbo_report.json

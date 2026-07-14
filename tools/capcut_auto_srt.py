@@ -20,6 +20,14 @@ from typing import Any
 import requests
 
 
+for stream_name in ("stdout", "stderr"):
+    stream = getattr(__import__("sys"), stream_name)
+    try:
+        stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
 API_HOST = "https://lv-pc-api-sinfonlinec.ulikecam.com"
 APP_VERSION = "8.8.0"
 USER_AGENT = "Cronet/TTNetVersion:01594da2 2023-03-14 QuicVersion:46688bb4 2022-11-28"
@@ -30,6 +38,7 @@ AAC_TIMELINE_SECONDS_PER_HOUR = 72.0
 AAC_RECOGNIZE_SECONDS_PER_HOUR = 36.0
 SESSION_SPLIT_TRIGGER_MS = 3 * 60 * 60 * 1000
 MAX_SESSION_MS = 2 * 60 * 60 * 1000
+RETRYABLE_HTTP_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
 
 def log(message: str) -> None:
@@ -38,6 +47,42 @@ def log(message: str) -> None:
 
 def progress(percent: float, message: str) -> None:
     print(f"PROGRESS:{max(0, min(99.9, percent)):.1f}:{message}", flush=True)
+
+
+def request_with_retries(
+    method: str,
+    url: str,
+    *,
+    label: str,
+    max_attempts: int = 5,
+    base_delay: float = 5.0,
+    **kwargs: Any,
+) -> requests.Response:
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = requests.request(method, url, **kwargs)
+            if response.status_code in RETRYABLE_HTTP_STATUS:
+                raise requests.HTTPError(
+                    f"{response.status_code} retryable server response",
+                    response=response,
+                )
+            response.raise_for_status()
+            return response
+        except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            retryable = (
+                isinstance(exc, (requests.Timeout, requests.ConnectionError))
+                or status in RETRYABLE_HTTP_STATUS
+            )
+            if not retryable or attempt >= max_attempts:
+                raise
+            delay = min(60.0, base_delay * attempt)
+            if status:
+                log(f"{label} tạm lỗi HTTP {status}; thử lại {attempt + 1}/{max_attempts} sau {delay:.0f} giây.")
+            else:
+                log(f"{label} tạm gián đoạn ({exc.__class__.__name__}); thử lại {attempt + 1}/{max_attempts} sau {delay:.0f} giây.")
+            time.sleep(delay)
+    raise RuntimeError(f"{label} lỗi không xác định.")
 
 
 def friendly_duration(seconds: float) -> str:
@@ -251,10 +296,13 @@ def upload_media(media: Path, device_id: str, label: str = "media") -> str:
         f"Credential={credentials['access_key_id']}/{date_stamp}/cn/vod/aws4_request, "
         f"SignedHeaders=x-amz-date;x-amz-security-token, Signature={signature}"
     )
-    apply_response = requests.get(
-        f"https://vod.bytedanceapi.com/?{query}", headers=auth_headers, timeout=60
+    apply_response = request_with_retries(
+        "get",
+        f"https://vod.bytedanceapi.com/?{query}",
+        headers=auth_headers,
+        timeout=60,
+        label="CapCut xin phiên upload",
     )
-    apply_response.raise_for_status()
     address = apply_response.json()["Result"]["UploadAddress"]
     store = address["StoreInfos"][0]
     host = address["UploadHosts"][0]
@@ -271,23 +319,47 @@ def upload_media(media: Path, device_id: str, label: str = "media") -> str:
         "Authorization": store["Auth"],
         "Content-CRC32": crc,
     }
-    with media.open("rb") as stream:
-        part = requests.put(
-            f"https://{host}/{store_uri}?partNumber=1&uploadID={upload_id}",
-            data=stream,
-            headers=upload_headers,
-            timeout=1800,
-        )
-    part.raise_for_status()
+    upload_url = f"https://{host}/{store_uri}?partNumber=1&uploadID={upload_id}"
+    for attempt in range(1, 7):
+        try:
+            with media.open("rb") as stream:
+                part = requests.put(
+                    upload_url,
+                    data=stream,
+                    headers=upload_headers,
+                    timeout=1800,
+                )
+            if part.status_code in RETRYABLE_HTTP_STATUS:
+                raise requests.HTTPError(
+                    f"{part.status_code} retryable server response",
+                    response=part,
+                )
+            part.raise_for_status()
+            break
+        except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            retryable = (
+                isinstance(exc, (requests.Timeout, requests.ConnectionError))
+                or status in RETRYABLE_HTTP_STATUS
+            )
+            if not retryable or attempt >= 6:
+                raise
+            delay = min(90.0, 10.0 * attempt)
+            if status:
+                log(f"CapCut upload audio tạm lỗi HTTP {status}; thử lại {attempt + 1}/6 sau {delay:.0f} giây.")
+            else:
+                log(f"CapCut upload audio tạm gián đoạn ({exc.__class__.__name__}); thử lại {attempt + 1}/6 sau {delay:.0f} giây.")
+            time.sleep(delay)
     if part.json().get("success") != 0:
         raise RuntimeError(f"CapCut upload part lỗi: {part.text[:500]}")
-    checked = requests.post(
+    checked = request_with_retries(
+        "post",
         f"https://{host}/{store_uri}?uploadID={upload_id}",
         data=f"1:{crc}",
         headers=upload_headers,
         timeout=60,
+        label="CapCut xác nhận upload",
     )
-    checked.raise_for_status()
     check_data = checked.json()
     if check_data.get("success") not in (None, 0):
         raise RuntimeError(f"CapCut upload check lỗi: {checked.text[:500]}")

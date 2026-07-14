@@ -1,6 +1,19 @@
 # VnSnap Studio 1.2.0 - Source Clean
 
-This release contains the clean source package for VnSnap Studio 1.2.0.
+This release publishes the current clean source for VnSnap Studio 1.2.0. It contains the complete application code while intentionally excluding every local credential, session and heavy runtime artifact.
+
+Bản phát hành này cập nhật source sạch hiện tại của VnSnap Studio 1.2.0, gồm đầy đủ mã ứng dụng nhưng chủ động loại toàn bộ credential, session và runtime nặng trên máy cá nhân.
+
+## Highlights / Điểm Nổi Bật
+
+- End-to-end Auto Edit workflow with shared layer presets and queue integration.
+- Manual timeline with blur, SRT, text, logo, audio, speed passes and final render.
+- Standard and segmented Turbo rendering with machine-aware worker selection.
+- TikTok no-cookie/cookie, CapCut Web/App and local voice workflows.
+- Gemini Web/API subtitle translation with block, retry and fallback handling.
+- Douyin and Bilibili single, playlist and profile/channel download workflows.
+- Four responsive themes and desktop/narrow layouts.
+- Portable resource detection and repair for FFmpeg, Python, models, Chromium and fonts.
 
 ## Included
 
@@ -12,6 +25,7 @@ This release contains the clean source package for VnSnap Studio 1.2.0.
 - CapCut subtitle/TTS helper tools
 - Portable setup and requirements scripts
 - Documentation and GitHub hygiene files
+- Brand assets, architecture guide, contribution guide and MIT license
 
 ## Not Included
 
@@ -26,13 +40,15 @@ This release contains the clean source package for VnSnap Studio 1.2.0.
 - FFmpeg binaries
 - packaged Electron release folders
 
-## Recommended Upload
+## Validation / Kiểm Thử
 
-- Tag: `v1.2.0`
-- Title: `VnSnap Studio 1.2.0 - Source Clean`
-- Asset: `VnSnapStudio_1.2.0_Source_Clean.zip`
+- Source and worker syntax checks.
+- Electron startup smoke test.
+- Secret scan for API key, cookie, session and bearer-token patterns.
+- Verification that ignored runtime and private profile paths are absent from Git.
 
 ## Notes
 
 After cloning or downloading the source, run `npm install` and use the in-app resource repair flow for production resources.
 
+Sau khi clone source, chạy `npm install`, mở app và dùng chức năng kiểm tra/tải tài nguyên để chuẩn bị môi trường production.

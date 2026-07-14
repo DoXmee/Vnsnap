@@ -5,6 +5,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.startLegacyTokenTask = exports.legacyCapCutService = void 0;
 const node_stream_1 = require("node:stream");
+const node_crypto_1 = __importDefault(require("node:crypto"));
 const ws_1 = require("ws");
 const env_1 = __importDefault(require("../configs/env"));
 const capcutLegacySpeakers_1 = require("../models/capcutLegacySpeakers");
@@ -17,6 +18,37 @@ const LEGACY_PLATFORM = '7';
 const LEGACY_SIGN_VERSION = '1';
 const LEGACY_TOKEN_REQUEST_TIMEOUT_MS = 10_000;
 const LEGACY_TOKEN_RETRY_DELAY_MS = 60_000;
+const createDynamicLegacySignature = (requestUrl) => {
+    const url = new URL(requestUrl);
+    const prefix = process.env.LEGACY_SIGN_PREFIX || '9e2c';
+    const suffix = process.env.LEGACY_SIGN_SUFFIX || '11ac';
+    const pathTailLength = Math.max(Number(process.env.LEGACY_SIGN_PATH_TAIL || 7) || 7, 7);
+    const platformId = process.env.LEGACY_SIGN_PLATFORM_ID || LEGACY_PLATFORM;
+    const appVersion = process.env.LEGACY_SIGN_APP_VERSION || LEGACY_CAPCUT_APP_VERSION;
+    const signVersion = process.env.LEGACY_SIGN_VERSION_DYNAMIC || LEGACY_SIGN_VERSION;
+    const tdid = process.env.LEGACY_SIGN_TDID || '';
+    const deviceTime = Math.floor(Date.now() / 1000).toString();
+    const raw = `${prefix}|${url.pathname.slice(-pathTailLength)}|${platformId}|${appVersion}|${deviceTime}|${tdid}|${suffix}`;
+    return {
+        deviceTime,
+        sign: node_crypto_1.default.createHash('md5').update(raw).digest('hex').toLowerCase(),
+        platformId,
+        appVersion,
+        signVersion,
+    };
+};
+const resolveLegacyAuth = (requestUrl) => {
+    if (process.env.LEGACY_SIGN_DYNAMIC === '1') {
+        return createDynamicLegacySignature(requestUrl);
+    }
+    return {
+        deviceTime: env_1.default.LEGACY_DEVICE_TIME ?? '',
+        sign: env_1.default.LEGACY_SIGN ?? '',
+        platformId: LEGACY_PLATFORM,
+        appVersion: LEGACY_CAPCUT_APP_VERSION,
+        signVersion: LEGACY_SIGN_VERSION,
+    };
+};
 class LegacyCapCutService {
     tokenState = {
         token: '',
@@ -125,15 +157,17 @@ class LegacyCapCutService {
      * 旧 token API を叩く
      */
     async fetchToken() {
-        const response = await fetch(`${env_1.default.LEGACY_CAPCUT_API_URL}/common/tts/token`, {
+        const tokenUrl = `${env_1.default.LEGACY_CAPCUT_API_URL}/common/tts/token`;
+        const auth = resolveLegacyAuth(tokenUrl);
+        const response = await fetch(tokenUrl, {
             method: 'POST',
             headers: new Headers({
-                Appvr: LEGACY_CAPCUT_APP_VERSION,
-                'Device-Time': env_1.default.LEGACY_DEVICE_TIME ?? '',
+                Appvr: auth.appVersion,
+                'Device-Time': auth.deviceTime,
                 Origin: env_1.default.CAPCUT_WEB_URL,
-                Pf: LEGACY_PLATFORM,
-                Sign: env_1.default.LEGACY_SIGN ?? '',
-                'Sign-Ver': LEGACY_SIGN_VERSION,
+                Pf: auth.platformId,
+                Sign: auth.sign,
+                'Sign-Ver': auth.signVersion,
                 'User-Agent': env_1.default.USER_AGENT,
             }),
             signal: AbortSignal.timeout(LEGACY_TOKEN_REQUEST_TIMEOUT_MS),
@@ -321,7 +355,20 @@ class LegacyCapCutService {
         throw new Error('Legacy CapCut endpoint is not configured. Set LEGACY_DEVICE_TIME and LEGACY_SIGN');
     }
 }
-const resolveLegacySpeaker = (type) => capcutLegacySpeakers_1.legacySpeakers[type] ?? LEGACY_DEFAULT_SPEAKER;
+const resolveLegacySpeaker = (type) => {
+    if (typeof type === 'string') {
+        const requested = type.trim();
+        if (/^(?:BV\d+_.*|VOV\d+_.*|ICL_[A-Za-z0-9_]+|jp_\d+)$/i.test(requested)) {
+            return requested;
+        }
+        const matched = capcutLegacySpeakers_1.capCutLegacySpeakers.find((model) => model.id.toLowerCase() === requested.toLowerCase() ||
+            String(model.type).toLowerCase() === requested.toLowerCase());
+        if (matched) {
+            return matched.id;
+        }
+    }
+    return capcutLegacySpeakers_1.legacySpeakers[type] ?? LEGACY_DEFAULT_SPEAKER;
+};
 const rawDataToBuffer = (data) => {
     if (Buffer.isBuffer(data)) {
         return data;

@@ -9,9 +9,10 @@ const singleQueryValue = (schema) => zod_1.z.preprocess((value) => {
     return value;
 }, schema);
 const numericQuery = (defaultValue) => singleQueryValue(zod_1.z.coerce.number().int()).default(defaultValue);
+const legacyTypeQuery = singleQueryValue(zod_1.z.union([zod_1.z.coerce.number().int(), zod_1.z.string().trim().min(1)])).default(0);
 exports.LegacySynthesizeQuerySchema = zod_1.z.object({
     text: singleQueryValue(zod_1.z.string().trim().min(1, 'text is required')),
-    type: numericQuery(0),
+    type: legacyTypeQuery,
     pitch: numericQuery(10),
     speed: numericQuery(10),
     volume: numericQuery(10),

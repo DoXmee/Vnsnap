@@ -4,6 +4,7 @@ const fs = require('fs');
 
 const portableRoot = path.dirname(process.execPath);
 const portableMarker = path.join(portableRoot, 'portable.marker');
+const appIcon = path.join(__dirname, 'assets', 'vnsnap-icon.png');
 if (fs.existsSync(portableMarker)) {
   const portableUserData = path.join(portableRoot, 'portable_data', 'electron_profile');
   fs.mkdirSync(portableUserData, { recursive: true });
@@ -12,6 +13,8 @@ if (fs.existsSync(portableMarker)) {
   process.env.DOUYIN_SESSION_DIR = path.join(portableRoot, 'portable_data', 'douyin_session');
   process.env.PLAYWRIGHT_BROWSERS_PATH = path.join(portableRoot, 'portable_data', 'playwright-browsers');
 }
+
+app.setName('VnSnap Studio');
 
 // Electron/Chromium can crash at startup on some Windows sessions after reboot
 // when the app is launched through a UNC-style path or stale GPU cache exists.
@@ -24,10 +27,25 @@ app.commandLine.appendSwitch('disable-features', 'Dawn,UseSkiaRenderer');
 
 let mainWindow = null;
 let isQuitting = false;
+let closeConfirmInFlight = false;
 const auxWindows = new Set();
 
 function removeDirQuiet(dir) {
   try { if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {}
+}
+
+function finishAppQuit() {
+  isQuitting = true;
+  closeConfirmInFlight = false;
+  for (const aux of [...auxWindows]) {
+    try { if (!aux.isDestroyed()) aux.destroy(); } catch (e) {}
+  }
+  setTimeout(() => {
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy();
+    } catch (e) {}
+    app.exit(0);
+  }, 100);
 }
 
 function cleanStartupGpuCaches() {
@@ -55,6 +73,7 @@ function createWindow () {
     minWidth: 460,
     minHeight: 720,
     title: "VnSnap Studio - Nitro Engine",
+    icon: fs.existsSync(appIcon) ? appIcon : undefined,
     autoHideMenuBar: true,
     webPreferences: {
       nodeIntegration: true, // Cho phép giao diện dùng lệnh Node.js
@@ -63,19 +82,25 @@ function createWindow () {
   });
 
   mainWindow = win;
-  win.on('close', () => {
-    if (!isQuitting) {
-      isQuitting = true;
-      for (const aux of [...auxWindows]) {
-        try { if (!aux.isDestroyed()) aux.destroy(); } catch (e) {}
-      }
-      setTimeout(() => {
-        try {
-          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy();
-        } catch (e) {}
-        app.exit(0);
-      }, 100);
+  win.on('close', async (event) => {
+    if (isQuitting) return;
+    event.preventDefault();
+    if (closeConfirmInFlight) return;
+    closeConfirmInFlight = true;
+    let hasActiveWork = false;
+    try {
+      hasActiveWork = await win.webContents.executeJavaScript(
+        'typeof window.__vnsnapHasActiveWork === "function" ? window.__vnsnapHasActiveWork() : false',
+        true
+      );
+    } catch (e) {
+      hasActiveWork = false;
     }
+    if (hasActiveWork) {
+      win.webContents.send('vnsnap-close-request');
+      return;
+    }
+    finishAppQuit();
   });
   win.on('closed', () => {
     mainWindow = null;
@@ -94,11 +119,21 @@ function createWindow () {
   return win;
 }
 
+ipcMain.handle('vnsnap-close-choice', async (_event, shouldClose) => {
+  if (!shouldClose) {
+    closeConfirmInFlight = false;
+    return false;
+  }
+  finishAppQuit();
+  return true;
+});
+
 ipcMain.handle('open-tiktok-login', async () => {
   const partition = 'persist:tiktok-login';
   const loginWin = new BrowserWindow({
     width: 1100,
     height: 780,
+    icon: fs.existsSync(appIcon) ? appIcon : undefined,
     title: 'Login TikTok - lấy cookie',
     autoHideMenuBar: true,
     webPreferences: {
@@ -142,6 +177,7 @@ ipcMain.handle('open-capcut-login', async () => {
   const loginWin = new BrowserWindow({
     width: 1180,
     height: 820,
+    icon: fs.existsSync(appIcon) ? appIcon : undefined,
     title: 'Đăng nhập CapCut Web',
     autoHideMenuBar: true,
     webPreferences: {
